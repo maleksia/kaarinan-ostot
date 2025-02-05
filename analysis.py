@@ -26,7 +26,7 @@ st.markdown("""
 # Datan latausfunktio
 @st.cache_data
 def load_data():
-    df = pd.read_csv('ostolaskudata-2023.csv', delimiter=';', encoding='latin-1')
+    df = pd.read_csv('data/ostolaskudata-2023.csv', delimiter=';', encoding='latin-1')
     df['Laskun summa ilman ALV'] = df['Laskun summa ilman ALV'].str.replace(r'\s+', '', regex=True).str.replace(',', '.', regex=False).astype(float)
     df['Tapaht.pvm'] = pd.to_datetime(df['Tapaht.pvm'], format='%d.%m.%Y')
     return df
