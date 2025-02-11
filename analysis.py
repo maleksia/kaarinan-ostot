@@ -24,12 +24,45 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # Datan latausfunktio
+def clean_column_names(df):
+    column_mapping = {
+        'Toimittajan  nimi': 'toimittaja_nimi',
+        'Laskun summa ilman ALV': 'laskun_summa',
+        'Tapaht.pvm': 'pvm',
+        'Tilin nimi': 'tili_nimi',
+        'Toimittajan maakoodi': 'maakoodi'
+    }
+    
+    df = df.copy()
+    
+    df.columns = df.columns.str.lower().str.replace(' ', '_')
+    
+    for old_name, new_name in column_mapping.items():
+        if old_name.lower().replace(' ', '_') in df.columns:
+            df = df.rename(columns={old_name.lower().replace(' ', '_'): new_name})
+    
+    return df
+
 @st.cache_data
 def load_data():
-    df = pd.read_csv('data/ostolaskudata-2023.csv', delimiter=';', encoding='latin-1')
-    df['Laskun summa ilman ALV'] = df['Laskun summa ilman ALV'].str.replace(r'\s+', '', regex=True).str.replace(',', '.', regex=False).astype(float)
-    df['Tapaht.pvm'] = pd.to_datetime(df['Tapaht.pvm'], format='%d.%m.%Y')
-    return df
+    try:
+        df = pd.read_csv('data/ostolaskudata-2023.csv', delimiter=';', encoding='utf-8')
+        
+        df = clean_column_names(df)
+        
+        df['laskun_summa'] = (df['laskun_summa'].astype(str)
+                                .str.replace(r'\s+', '', regex=True)
+                                .str.replace(',', '.', regex=False)
+                                .astype(float))
+        
+        df['pvm'] = pd.to_datetime(df['pvm'], format='%d.%m.%Y')
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Virhe datan latauksessa: {str(e)}")
+        st.write("Tarkista että tiedosto 'data/ostolaskudata-2023.csv' on olemassa ja oikeassa muodossa.")
+        return pd.DataFrame()
 
 def create_filters(df):
     st.sidebar.header("📊 Suodattimet")
@@ -41,35 +74,46 @@ def create_filters(df):
     date_range = st.sidebar.date_input(
         "📅 Päivämääräalue",
         [default_start, default_end],
-        min_value=df['Tapaht.pvm'].min(),
-        max_value=df['Tapaht.pvm'].max()
+        min_value=df['pvm'].min(),
+        max_value=df['pvm'].max()
     )
     
     # Tilin suodatin
     selected_accounts = st.sidebar.multiselect(
         "Valitse kategoriat",
-        options=sorted(df['Tilin nimi'].unique())
+        options=sorted(df['tili_nimi'].unique())
     )
     
     # Toimittajan suodatin
     selected_suppliers = st.sidebar.multiselect(
         "Valitse toimittajat",
-        options=sorted(df['Toimittajan  nimi'].unique())
+        options=sorted(df['toimittaja_nimi'].unique())
     )
+    
+    min_df_value = float(df['laskun_summa'].min())
+    max_df_value = float(df['laskun_summa'].max())
     
     # Summa-alueen suodatin
     min_amount, max_amount = st.sidebar.slider(
         "💶 Laskun summa-alue (€)",
-        min_value=float(df['Laskun summa ilman ALV'].min()),
-        max_value=float(df['Laskun summa ilman ALV'].max()),
-        value=(float(df['Laskun summa ilman ALV'].min()), float(df['Laskun summa ilman ALV'].max())),
+        min_value=min_df_value,
+        max_value=max_df_value,
+        value=(0.0, max_df_value),
         format="%.2f €"
     )
     
     # Mahdollisuus syöttää tarkat summat
     st.sidebar.write("Tai syötä tarkat summat:")
-    min_amount_input = st.sidebar.number_input("Minimi summa (€)", value=min_amount, format="%.2f")
-    max_amount_input = st.sidebar.number_input("Maksimi summa (€)", value=max_amount, format="%.2f")
+    min_amount_input = st.sidebar.number_input("Minimi summa (€)", 
+                                             value=min_amount,
+                                             min_value=min_df_value,
+                                             max_value=max_df_value,
+                                             format="%.2f")
+    max_amount_input = st.sidebar.number_input("Maksimi summa (€)", 
+                                             value=max_amount,
+                                             min_value=min_df_value,
+                                             max_value=max_df_value,
+                                             format="%.2f")
     
     return date_range, selected_accounts, selected_suppliers, min_amount_input, max_amount_input
 
@@ -80,7 +124,7 @@ def plot_top_suppliers(df):
         return None
     
     fig, ax = plt.subplots(figsize=(10, 6))
-    top_suppliers = df.groupby('Toimittajan  nimi')['Laskun summa ilman ALV'].sum().sort_values(ascending=True).tail(10)
+    top_suppliers = df.groupby('toimittaja_nimi')['laskun_summa'].sum().sort_values(ascending=True).tail(10)
     colors = plt.cm.viridis(np.linspace(0, 0.8, len(top_suppliers)))
     top_suppliers.plot(kind='barh', ax=ax, color=colors, edgecolor='black')
     
@@ -98,7 +142,7 @@ def plot_monthly_spending(df):
         return None
     
     fig, ax = plt.subplots(figsize=(10, 6))
-    monthly_spending = df.groupby(df['Tapaht.pvm'].dt.strftime('%Y-%m'))['Laskun summa ilman ALV'].sum()
+    monthly_spending = df.groupby(df['pvm'].dt.strftime('%Y-%m'))['laskun_summa'].sum()
     monthly_spending.plot(kind='line', marker='o', ax=ax, color='royalblue', linewidth=2, markersize=8)
     
     ax.set_title('Kuukausittainen kulutus', fontsize=16, pad=20)
@@ -116,13 +160,27 @@ def plot_account_distribution(df):
         st.warning("Ei dataa näytettäväksi.")
         return None
     
+    account_spending = df.groupby('tili_nimi')['laskun_summa'].sum().sort_values(ascending=False).head(10)
+    
+    if all(account_spending < 0):
+        st.warning("Valitut tiedot sisältävät vain negatiivisia arvoja. Piirakkakaavio vaatii positiivisia arvoja.")
+        return None
+    
+    if any(account_spending < 0):
+        st.warning("Huomio: Jotkin tilit sisältävät negatiivisia arvoja. Näytetään vain tilit, joilla on positiivisia arvoja.")
+        account_spending = account_spending[account_spending > 0]
+        
+        if account_spending.empty:
+            st.warning("Ei positiivisia arvoja näytettäväksi piirakkaakaaviossa.")
+            return None
+    
     fig, ax = plt.subplots(figsize=(12, 8))
-    account_spending = df.groupby('Tilin nimi')['Laskun summa ilman ALV'].sum().sort_values(ascending=False).head(10)
     colors = plt.cm.viridis(np.linspace(0, 0.8, len(account_spending)))
-    account_spending.plot(kind='pie', ax=ax, autopct='%1.1f%%', colors=colors, startangle=90, wedgeprops={'edgecolor': 'black'})
+    account_spending.plot(kind='pie', ax=ax, autopct='%1.1f%%', 
+                         colors=colors, startangle=90, 
+                         wedgeprops={'edgecolor': 'black'})
     
     ax.set_title('Top 10 tilit kulutuksen mukaan', fontsize=16, pad=20)
-    
     ax.legend(loc='center left', bbox_to_anchor=(1, 0.5), fontsize=10)
     plt.tight_layout()
     return fig
@@ -133,8 +191,8 @@ def plot_invoice_distribution(df):
         return None
     
     fig, ax = plt.subplots(figsize=(10, 6))
-    df_filtered = df[df['Laskun summa ilman ALV'] < df['Laskun summa ilman ALV'].quantile(0.95)]
-    sns.histplot(data=df_filtered, x='Laskun summa ilman ALV', bins=50, ax=ax, color='royalblue', edgecolor='black')
+    df_filtered = df[df['laskun_summa'] < df['laskun_summa'].quantile(0.95)]
+    sns.histplot(data=df_filtered, x='laskun_summa', bins=50, ax=ax, color='royalblue', edgecolor='black')
     
     ax.set_title('Laskujen summien jakauma\n(poislukien ylimmät 5% paremman visualisoinnin vuoksi)', fontsize=16, pad=20)
     ax.set_xlabel('Laskun summa (€)', fontsize=12)
@@ -146,13 +204,13 @@ def plot_invoice_distribution(df):
     return fig
 
 def apply_filters(df, date_range, selected_accounts, selected_suppliers, min_amount, max_amount):
-    mask = (df['Tapaht.pvm'].dt.date >= date_range[0]) & (df['Tapaht.pvm'].dt.date <= date_range[1])
-    mask &= (df['Laskun summa ilman ALV'] >= min_amount) & (df['Laskun summa ilman ALV'] <= max_amount)
+    mask = (df['pvm'].dt.date >= date_range[0]) & (df['pvm'].dt.date <= date_range[1])
+    mask &= (df['laskun_summa'] >= min_amount) & (df['laskun_summa'] <= max_amount)
     
     if selected_accounts:
-        mask &= df['Tilin nimi'].isin(selected_accounts)
+        mask &= df['tili_nimi'].isin(selected_accounts)
     if selected_suppliers:
-        mask &= df['Toimittajan  nimi'].isin(selected_suppliers)
+        mask &= df['toimittaja_nimi'].isin(selected_suppliers)
     
     return df[mask]
 
@@ -190,31 +248,31 @@ def display_metrics(filtered_df):
         )
         st.metric(
             "Keskimääräinen lasku", 
-            f"{filtered_df['Laskun summa ilman ALV'].mean():,.2f} €",
+            f"{filtered_df['laskun_summa'].mean():,.2f} €",
             help="Suodatettujen laskujen keskiarvo"
         )
     
     with col2:
         st.metric(
             "Kokonaiskulut", 
-            f"{filtered_df['Laskun summa ilman ALV'].sum():,.2f} €",
+            f"{filtered_df['laskun_summa'].sum():,.2f} €",
             help="Suodatettujen laskujen yhteissumma"
         )
         st.metric(
             "Suurin lasku", 
-            f"{filtered_df['Laskun summa ilman ALV'].max():,.2f} €",
+            f"{filtered_df['laskun_summa'].max():,.2f} €",
             help="Suurimman laskun summa"
         )
     
     with col3:
         st.metric(
             "Uniikit toimittajat", 
-            f"{filtered_df['Toimittajan  nimi'].nunique():,}",
+            f"{filtered_df['toimittaja_nimi'].nunique():,}",
             help="Eri toimittajien määrä"
         )
         st.metric(
             "Pienin lasku",
-            f"{filtered_df['Laskun summa ilman ALV'].min():,.2f} €",
+            f"{filtered_df['laskun_summa'].min():,.2f} €",
             help="Pienimmän laskun summa"
         )
 
@@ -249,11 +307,10 @@ def main():
     # Esimerkki SQL-kyselyt
     example_queries = [
         ("SELECT * FROM filtered_df LIMIT 10", "Näytä ensimmäiset 10 riviä suodatetusta datasta."),
-        ("SELECT `Toimittajan  nimi`, SUM(`Laskun summa ilman ALV`) as Yhteensä FROM filtered_df GROUP BY `Toimittajan  nimi` ORDER BY Yhteensä DESC LIMIT 10", "Näytä top 10 toimittajaa kokonaiskulutuksen mukaan."),
-        ("SELECT `Tilin nimi`, COUNT(*) FROM filtered_df GROUP BY `Tilin nimi` ORDER BY `Tilin nimi` DESC LIMIT 10", "Näytä top 10 tiliä laskujen määrän mukaan."),
-        ("SELECT `Tapaht.pvm`, SUM(`Laskun summa ilman ALV`) as PäivänKulutus FROM filtered_df GROUP BY `Tapaht.pvm` ORDER BY `Tapaht.pvm`", "Näytä päivittäinen kulutus."),
-        ("SELECT `Toimittajan maakoodi`, COUNT(*) as LaskujenMäärä FROM filtered_df GROUP BY `Toimittajan maakoodi` ORDER BY LaskujenMäärä DESC", "Näytä laskujen määrä toimittajan maakoodin mukaan."),
-        ("SELECT CASE WHEN `Tapaht.pvm` < '2023-01-01' THEN 'Laskujen määrä ennen 2023' WHEN `Tapaht.pvm` >= '2023-01-01' THEN 'Laskujen määrä vuonna 2023' END AS aikajakso, COUNT(*) AS 'Tapahtumien määrä' FROM df GROUP BY aikajakso", "Näytä laskujen määrä koko tietokannasta ennen ja jälkeen vuoden 2023.")
+        ("SELECT toimittaja_nimi, SUM(laskun_summa) as Yhteensä FROM filtered_df GROUP BY toimittaja_nimi ORDER BY Yhteensä DESC LIMIT 10", "Näytä top 10 toimittajaa kokonaiskulutuksen mukaan."),
+        ("SELECT tili_nimi, COUNT(*) FROM filtered_df GROUP BY tili_nimi ORDER BY tili_nimi DESC LIMIT 10", "Näytä top 10 tiliä laskujen määrän mukaan."),
+        ("SELECT maakoodi, COUNT(*) as LaskujenMäärä FROM filtered_df GROUP BY maakoodi ORDER BY LaskujenMäärä DESC", "Näytä laskujen määrä toimittajan maakoodin mukaan."),
+        ("SELECT CASE WHEN pvm < '2023-01-01' THEN 'Laskujen määrä ennen 2023' WHEN pvm >= '2023-01-01' THEN 'Laskujen määrä vuonna 2023' END AS aikajakso, COUNT(*) AS 'Tapahtumien määrä' FROM df GROUP BY aikajakso", "Näytä laskujen määrä koko tietokannasta ennen ja jälkeen vuoden 2023.")
     ]
     
     st.write("Esimerkki SQL-kyselyjä:")
@@ -266,7 +323,7 @@ def main():
     
     if sql_query:
         try:
-            # Suorita SQL-kysely suodatetulle DataFramelle
+            # Suorita SQL-kysely suodatetulle datalle
             result = sqldf(sql_query, locals())
             
             # Näytä tulos
@@ -300,7 +357,7 @@ def main():
         # Näytä sivutettu DataFrame
         st.dataframe(
             filtered_df.iloc[start_idx:end_idx].style.format({
-                'Laskun summa ilman ALV': '{:,.2f} €'
+                'laskun_summa': '{:,.2f} €'
             })
         )
 
